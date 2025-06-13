@@ -30,7 +30,7 @@
         devShells.default = pkgs.mkShell {
           buildInputs = with pkgs; [ ];
           nativeBuildInputs = with pkgs; [
-            zigpkgs.master
+            zigpkgs."0.14.0"
             wayland
             wayland-scanner
             libxkbcommon
