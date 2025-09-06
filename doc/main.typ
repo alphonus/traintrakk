@@ -60,7 +60,7 @@ The second is that there exists no data which i could find of (model) trains wit
 == Models
 
 I plan on scouring the web in this sequence to find a collection of suitable base architectures and backbones.
-A sufficnetly trained backbone should boost detection accuracy by having learned from a highly varied dataset and will keep my training efforts low.
+A sufficiently trained backbone should boost detection accuracy by having learned from a highly varied dataset and will keep my training efforts low.
 
 1. Shitty AI blogs
   - the offer a quick list of popular open source projects and the general concensus
@@ -70,3 +70,35 @@ A sufficnetly trained backbone should boost detection accuracy by having learned
   - oh god, help me :(
 
 
+= Approaches
+There are two core methods on how to do multi object keypoint detection, as the challenge is no longer just to detect keypoints at all, but to also assign them to the same object.
+One can choose to first detect all relevant objects and afterwards for each individually in their cropped region the keypoints(top-down) or all keypoints are detected at the same time and in a second step they are assigned to objects(bottom-up).
+Examples of the detect-then-key method are .....
+This has the added challenge of requiring two models. A detector and a key point regressor. Though in such an application interference from other instances should be minimized and a simpler keypoint detection method can be used.
+For the key-then-cluster methods existing methods are @cao_openpose_2019 and .
+
+The core structure of the network will be the self supervised video encoder-decoder method from @jakab_unsupervised_2018
+
+A core challenge is the lack of any supervised training data.
+This was already given as a condition, but from that follows a much more severe impact on to the key point detection.
+Most, if not all, Keypoint detection (specifically pose estimation) methods make use of unique keypoints if doing a bottoms up approach.
+This was the main reason why a top-down approach was pursued. But as noted in @kreiss_openpifpaf_2021 occlusion of objects can be a major concern for such applications.
+But in this applications there can not be unique points as many trains can be symmetrical.
+A method to match unknown but unique points is therefore needed.
+Landmark detection is the field of trying to match multiple different images of the same object.
+This is somewhat different to this usecase where multiple different points need to be identified.
+In Superpoint @detone_superpoint_2018 one such method is proposed where points are matched by minimizing a hinge loss.
+This description can then be utilized to create artificial point categories.
+
+
+
+After the identification the other aspect of associating parts comes up.
+As I dont wan tto make a full segmentation model using such masks are not possible.
+an option is using some weak points to identify objects as some MASTER part. See GNN
+The idea is then to use an ideal labled image or model as a guide in some way to associate the parts with the proper wagons, where the matching loss needs to be minimized. 
+
+== Finetuning of the keypoint locator.
+The model can be finetuned to only detect model train keypoints by biasing it using a train mask.
+This can be gotten by randomly sampling examples and placing keypoints of the in and out class like in @cheng_pointlysupervised_2022
+
+#bibliography("TrainTrakk.bib") 
