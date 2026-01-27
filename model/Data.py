@@ -24,6 +24,7 @@ from torch.profiler import record_function
 from torch.utils.data import Dataset
 from torchvision.io import decode_image
 from torchvision.transforms import v2
+from torchvision.ops import masks_to_boxes
 
 from zoo.SuperPointPretrainedNetwork.demo_superpoint import SuperPointNet
 
@@ -96,8 +97,33 @@ def get_center(mask) -> np.array:
         for i in range(n_train)
     ]
 
-
-
+def np_readout(semi, conf_thresh=0.15):
+    # --- Process points.
+    #print('semi',semi.shape)
+    dense = np.exp(semi)  # Softmax.
+    dense = dense / (np.sum(dense, axis=0) + 0.00001)  # Should sum to 1.
+    # Remove dustbin.
+    nodust = dense[:-1, :, :]
+    # Reshape to get full resolution heatmap.
+    Hc = int(H / CELL)
+    Wc = int(W / CELL)
+    #print('nodust shape pre trasnpose', nodust.shape)
+    nodust = nodust.transpose(1, 2, 0)
+    #print('nodust shape', nodust.shape)
+    heatmap = np.reshape(nodust, [Hc, Wc, CELL, CELL])
+    #print('heatmap pre shape', heatmap.shape)
+    heatmap = np.transpose(heatmap, [0, 2, 1, 3])
+    #print('heatmap pre 2 shape', heatmap.shape)
+    heatmap = np.reshape(heatmap, [Hc * CELL, Wc * CELL])
+    #print('heatmap shape', heatmap.shape)
+    xs, ys = np.where(heatmap >= conf_thresh)  # Confidence threshold.
+    return (xs,ys),heatmap
+    
+def quick_readout(pred_blocks, conf_thresh=0.15):
+    shuffel = torch.nn.PixelShuffle(8)
+    pred_blocks = torch.nn.Softmax()(pred_blocks)[:-1]
+    dense = shuffel(pred_blocks).squeeze()
+    return torch.nonzero(dense >= conf_thresh, as_tuple=True), dense
 
 def gen_keypoints(img, net, conf_thresh=0.015, nms_dist=4):
     # pylint: disable=too-many-statements,too-many-locals
@@ -185,20 +211,7 @@ def gen_keypoints(img, net, conf_thresh=0.015, nms_dist=4):
     inp = torch.from_numpy(inp)
     inp = torch.autograd.Variable(inp).view(1, 1, H, W)
     semi, coarse_desc = net.forward(inp)
-    semi = semi.data.cpu().numpy().squeeze()
-    # --- Process points.
-    dense = np.exp(semi)  # Softmax.
-    dense = dense / (np.sum(dense, axis=0) + 0.00001)  # Should sum to 1.
-    # Remove dustbin.
-    nodust = dense[:-1, :, :]
-    # Reshape to get full resolution heatmap.
-    Hc = int(H / CELL)
-    Wc = int(W / CELL)
-    nodust = nodust.transpose(1, 2, 0)
-    heatmap = np.reshape(nodust, [Hc, Wc, CELL, CELL])
-    heatmap = np.transpose(heatmap, [0, 2, 1, 3])
-    heatmap = np.reshape(heatmap, [Hc * CELL, Wc * CELL])
-    xs, ys = np.where(heatmap >= conf_thresh)  # Confidence threshold.
+    (xs,ys), heatmap = np_readout(semi.data.cpu().numpy().squeeze())
     if len(xs) == 0:
         return np.zeros((3, 0)), None, None
     pts = np.zeros((3, len(xs)))  # Populate point data sized 3xN.
@@ -230,7 +243,6 @@ def gen_keypoints(img, net, conf_thresh=0.015, nms_dist=4):
         desc = desc.data.cpu().numpy().reshape(D, -1)
         desc /= np.linalg.norm(desc, axis=0)[np.newaxis, :]
     return pts, desc, heatmap
-
 
 def read_image(impath, img_size=(120, 160)):
     """Read image as grayscale and resize to img_size.
@@ -289,7 +301,7 @@ class MMRPifPafTune(Dataset):
         y_index = torch.arange(self.internal_size[0]).double()
         x_index = torch.arange(self.internal_size[1]).double()
         vector_field = (
-            torch.cartesian_prod(y_index, x_index).reshape(640, 480, 2).double()
+            torch.cartesian_prod(y_index, x_index).reshape(2, 640, 480).double()
         )
         centroids = []
         self.fields = {}
@@ -321,10 +333,12 @@ class MMRPifPafTune(Dataset):
             idx = img_cords[0].T
             with record_function("assign_field"):
                 tmp_field = vector_field.detach().clone()
-                tmp_field[idx[0], idx[1]] = kpts[0, pixel_entity_assigment]
-                self.fields[k] = tmp_field
+                #print(kpts[0, pixel_entity_assigment])
+                #print('kpts[0, pixel_entity_assigment] shape', kpts[0, pixel_entity_assigment].shape)
+                tmp_field[:,idx[0], idx[1]] = kpts[0, pixel_entity_assigment].T
+                self.fields[k] = tmp_field.float()
                 del tmp_field
-            new_masks[k] = mask
+            new_masks[k] = mask.float()
         self.masks = new_masks
 
     @torch.no_grad()
@@ -355,12 +369,15 @@ class MMRPifPafTune(Dataset):
         self.keypoints = keypoints_list
         self.keypoint_embeds = keypoint_embeds
 
-    def __init__(self, root: Path, transforms=None, interpolation_threshold=150):
+    def __init__(self, root: Path, image_transforms=None, target_transforms=None, transforms=None, interpolation_threshold=150, debug=False):
+        self.debug = debug
         if isinstance(root, str):
             self.root = Path(root)
         elif isinstance(root, Path):
             self.root = root
         self.transforms = transforms
+        self.image_transforms = image_transforms
+        self.target_transforms = target_transforms
         with record_function("process_annotations"):
             self.pre_annotations = process_json_annotations(
                 "data/coco_fix_json(1).json"
@@ -394,24 +411,39 @@ class MMRPifPafTune(Dataset):
     def __getitem__(self, idx):
         img_nameid = self.image_instances[idx]
         img_path = self.root / img_nameid
-        image = decode_image(img_path)
+        image = decode_image(img_path, mode='RGB')
         with torch.no_grad():
             image = v2.functional.resize(
                 image, self.internal_size
             )
         target = {}
-        pts = self.keypoints[idx].squeeze()  # .squeeze()
-        lpts = torch.reshape(pts.T, (2, -1))
         mask = self.masks[img_nameid]  # .max(axis=0).values
-        labels = mask[:, lpts[1], lpts[0]]
-        target["poi"] = pts  # nts_of_interest
-        target["labels"] = labels
-        target["image_id"] = img_nameid
-        #target["masks"] = tv_tensors.Mask(self.masks[img_nameid])
 
+        if self.debug:
+            pts = self.keypoints[idx].squeeze()
+            lpts = torch.reshape(pts.T, (2, -1))
+            labels = mask[:, lpts[1], lpts[0]]
+            target["poi"] = pts#.unsqueeze(0)   # nts_of_interest
+            target["labels"] = labels#.unsqueeze(0) #== the mask
+            target["image_id"] = img_nameid
+            target['mask'] = mask
+            target['bbox'] = masks_to_boxes(mask)
+        else:
+            target['mask'] = torch.amax(mask,0, keepdim=True)#.unsqueeze(0) 
+        #target['mask'] = mask
+        target["fields"] = self.fields[img_nameid]#.unsqueeze(0) 
+        #target["masks"] = tv_tensors.Mask(self.masks[img_nameid])
+        if self.image_transforms:
+            image = self.image_transforms(image)
+        if self.target_transforms:
+            target = self.target_transforms(target)
         if self.transforms:
-            image, target = self.transforms(image, target)
+            image = self.transforms(image)
+            target['mask'] = self.transforms(target['mask'])
+            target['fields'] = self.transforms(target['fields'])
+            target['bbox'] = self.transforms(target.get('bbox'))
         return image, target
+
 class MMRFineTune(Dataset):
     @staticmethod
     def istrain(path: Path) -> bool:
@@ -436,7 +468,7 @@ class MMRFineTune(Dataset):
 
     def __getitem__(self, idx):
         if idx < self.max_contrast:
-            image = torchvision.transforms.functional.pil_to_tensor(
+            image = v2.functional.pil_to_tensor(
                 self.contrast[idx]["image"]
             )
             is_train = False
@@ -463,19 +495,17 @@ class MMRFineTune(Dataset):
             labels = torch.zeros((num_objs,), dtype=torch.int64)
         area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0])
         target = {}
-        # print('imgesize: ', type(torchvision.transforms.functional.get_image_size(image)))
-        # print('shape: ', image.shape)
         target["boxes"] = torchvision.tv_tensors.BoundingBoxes(
             boxes, format="XYXY", canvas_size=(h, w)
         )
 
-        # target["masks"] = tv_tensors.Mask(masks)
+        target["masks"] = tv_tensors.Mask(masks)
         target["labels"] = labels
         target["image_id"] = idx
         target["area"] = area
 
-        if self.transform is not None:
-            image, target = self.transform(image, target)
+        if self.transforms is not None:
+            image, target = self.transforms(image, target)
         return image, target
 
 

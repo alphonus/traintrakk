@@ -1,0 +1,11 @@
+datasets
+--index-url https://download.pytorch.org/whl/cpu
+notebook
+matplotlib
+numpy
+pandas
+opencv-python
+pillow
+
+torch
+torchvision
