@@ -1,11 +1,11 @@
 datasets
---index-url https://download.pytorch.org/whl/cpu
-notebook
+
+#notebook
 matplotlib
-numpy
-pandas
-opencv-python
+#numpy
+#pandas
+#opencv-python
 pillow
 
-torch
-torchvision
+#torch --index-url https://download.pytorch.org/whl/cpu
+#torchvision --index-url https://download.pytorch.org/whl/cpu

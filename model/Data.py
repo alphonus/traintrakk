@@ -301,7 +301,7 @@ class MMRPifPafTune(Dataset):
         y_index = torch.arange(self.internal_size[0]).double()
         x_index = torch.arange(self.internal_size[1]).double()
         vector_field = (
-            torch.cartesian_prod(y_index, x_index).reshape(2, 640, 480).double()
+            torch.cartesian_prod(y_index, x_index).reshape(2, 640, 480).double() #magic numbers 640, 480
         )
         centroids = []
         self.fields = {}

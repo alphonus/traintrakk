@@ -1,7 +1,24 @@
-{ pkgs ? import <nixpkgs> {} }: let pythonPackages = pkgs.python312Packages; in
-(pkgs.buildFHSEnv {
-    name = "pipzone";
-  buildInputs = [
+{
+  description = "Python venv development template";
+
+  inputs = {
+    #utils.url = "github:numtide/flake-utils";
+  };
+
+  outputs = {
+    self,
+    nixpkgs,
+    ...
+  }:
+    let
+      system = "x86_64-linux";
+      pkgs = import nixpkgs {inherit system;};
+      pythonPackages = pkgs.python312Packages;
+    in {
+      devShell.${system} = pkgs.mkShell {
+        name = "python-venv";
+        venvDir = "./.venv";
+        buildInputs = [
           # A Python interpreter including the 'venv' module is required to bootstrap
           # the environment.
           pythonPackages.python
@@ -14,14 +31,18 @@
           # add them to PYTHONPATH and thus make them accessible from within the venv.
           pythonPackages.opencv4
           pythonPackages.pandas
-
+          pythonPackages.datasets
+          pythonPackages.matplotlib
           pythonPackages.numpy
           pythonPackages.torch
           pythonPackages.torchvision
           pythonPackages.jupyter
+          #pythonPackages.jupyter-contrib-core
+          #pythonPackages.jupyter-nbextensions-configurator
         ];
 
-  postVenvCreation = ''
+        # Run this command, only after creating the virtual environment
+        postVenvCreation = ''
           unset SOURCE_DATE_EPOCH
           pip install -r requirements.txt
         '';
@@ -32,5 +53,6 @@
           # allow pip to install wheels
           unset SOURCE_DATE_EPOCH
         '';
-  runScript = "bash";
-})#.env
+      };
+    };
+}
