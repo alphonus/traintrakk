@@ -10,6 +10,7 @@ import os.path
 from pathlib import Path
 from typing import Dict, List, Tuple
 import math
+import copy
 
 import cv2
 import numpy as np
@@ -19,24 +20,29 @@ import itertools
 import torch
 import torchvision
 from datasets import load_dataset
-from scipy.interpolate import CloughTocher2DInterpolator
+from scipy.interpolate import CloughTocher2DInterpolator, LinearNDInterpolator
 from torch.profiler import record_function
 from torch.utils.data import Dataset
+from torchvision import tv_tensors
 from torchvision.io import decode_image
 from torchvision.transforms import v2
 from torchvision.ops import masks_to_boxes
+from torch.distributions.normal import Normal
 
 from zoo.SuperPointPretrainedNetwork.demo_superpoint import SuperPointNet
 
 
-def process_json_annotations(filename: str) -> List:
+def process_json_annotations(filename: str, imgroot: Path) -> List:
     """reads a via generated json annotation file to convert to individual masks."""
     masks = {}
+    bboxes = {}
     with open(filename, encoding="utf-8") as fileptr:
         dump = json.load(fileptr)
+        if '_via_img_metadata' in dump.keys():
+            dump = dump['_via_img_metadata']
     file_struct = {"filename", "size", "regions", "file_attributes"}
     for k in dump.keys():
-        assert set(dump[k].keys()) <= file_struct, "File format err"
+        assert set(dump[k].keys()) <= file_struct, f"File format err, got{set(dump.keys())}"
     for k, image in dump.items():
         rects = list(
             filter(lambda x: x["shape_attributes"]["name"] == "rect", image["regions"])
@@ -45,13 +51,16 @@ def process_json_annotations(filename: str) -> List:
         assert n_trains == len(
             rects
         ), f"length mismatch in {k}. expected{n_trains}, got {len(rects)}"
-        masks[image["filename"]] = gen_mask(image["regions"], (720, 1280), n_trains)
-    return masks
+        #img_size = get_img_size()
+        im = cv2.imread(imgroot / image["filename"])
+        H, W, C = im.shape
+        masks[image["filename"]], bboxes[image["filename"]] = gen_mask(image["regions"], (H, W), n_trains)
+    return masks, bboxes
 
 
 @torch.no_grad()
 def gen_mask(
-    regions: List[Dict], image_size: Tuple[int], n_trains: int, cutoff=0.2
+    regions: List[Dict], image_size: Tuple[int], n_trains: int, cutoff=0.1
 ):  # -> torch.Tensor
     bboxs = sorted(
         filter(lambda x: x["shape_attributes"]["name"] == "rect", regions),
@@ -67,27 +76,59 @@ def gen_mask(
         )
         for i in range(n_trains)
     ]
-    mask = np.zeros((n_trains, image_size[1], image_size[0]), dtype=np.bool)
+    H,W = image_size
+    #h_grid = torch.arange(0,H,1)
+    #w_grid = torch.arange(0,W,1)
+    #mask = torch.zeros((n_trains, H, W), dtype=torch.float)#from bool
+    mask = []
+    #Y, X = np.meshgrid(np.arange(0,H,1), np.arange(0,W,1))
+    #blurrer = v2.GaussianBlur(kernel_size=(11, 1), sigma=(5., 5.))
+    boxes = []
     for i in range(n_trains):
+        bbox = bboxs[i]["shape_attributes"]
+        x0, y0, width, height = bbox["x"], bbox["y"], bbox["width"], bbox["height"]
+        centroid = (y0 + height/2, x0 + width/2)
+        boxes.append([x0, x0 + width, y0, y0+height])  #XYXY
+        #set sigma as 2* bbox max dim as a ration of image dim
+        sigma = float(max(H,W))
+        #h_dist = torch.exp(Normal(torch.tensor([y0+height/2]), torch.tensor([sigma])).log_prob(h_grid))
+        # 1.0-abs(p-centroid[0])/sigma
+        h_dist = torch.tensor([max(0.0, 1.0 - abs(p - centroid[0]) / sigma) * 0.5 for p in range(H)])
+        w_dist = torch.tensor([max(0.0, 1.0 - abs(p - centroid[1]) / sigma) * 0.5 for p in range(W)])
+        #w_dist = torch.exp(Normal(torch.tensor([x0+width/2]), torch.tensor([sigma])).log_prob(w_grid))
+        centr_map = torch.outer(h_dist, w_dist)
+        assert centr_map.shape == (H, W), centr_map.shape
+        assert centr_map.dtype == torch.float, centr_map.dtype
+        #assert centr_map.amin()>= 0.0 and centr_map.amax() <= 1.0 and centr_map.amax() > 0.9, (centr_map.max(), centr_map.min())
+        #mask[i] = centr_map.detach().clone()
+
         points = []
         values = []
         for point in sorted_points[i]:
-            posx = point["shape_attributes"]["cx"]
-            posy = point["shape_attributes"]["cy"]
+            posx = float(point["shape_attributes"]["cx"])
+            posy = float(point["shape_attributes"]["cy"])
             label = float(point["region_attributes"]["entity"] == "train")
-            points.append((posx, posy))
+            points.append((posy,posx))
             values.append(label)
         points = np.array(points)
         values = np.array(values)
-        interp = CloughTocher2DInterpolator(points, values, fill_value=0.0)
-        bbox = bboxs[i]["shape_attributes"]
-        x0, y0, width, height = bbox["x"], bbox["y"], bbox["width"], bbox["height"]
-        X = np.arange(x0, x0 + width, 1)
-        Y = np.arange(y0, y0 + height, 1)
-        X, Y = np.meshgrid(X, Y)
-        Z = interp(X, Y) > cutoff
-        mask[i, y0 : y0 + height, x0 : x0 + width] = Z
-    return torch.from_numpy(mask.astype(float))
+        assert values.min() >= 0.0 and values.max() <= 1.0, "Values out of range [0,1]"
+        interp = LinearNDInterpolator(points, values, fill_value=0.0)#, fill_value=0.0 TEST if biasing the bbox helps
+
+        X = np.arange(x0, x0 + width, 1, dtype=np.float32)# rewrite to bias the whole image
+        Y = np.arange(y0, y0 + height, 1, dtype=np.float32)
+        Y, X = np.meshgrid(Y, X)
+        Z = torch.tensor(interp(Y,X).T) #> cutoff
+        assert Z.size() == (height, width), f"Got ({Z.shape}, expected: {(height, width)})"
+        assert Z.max() < 1.1, f"Z max larger 1, is {Z.max()}, min: {Z.min()}"
+        assert (Z > cutoff).any(), f"No mask created for train {i}, Y:{Y.shape},X:{X.shape}, Z:{Z.shape}"
+        centr_map[y0: y0 + height, x0: x0 + width] = torch.clamp(Z, min=0.0, max=1.0).detach().clone()
+        mask.append(centr_map.detach().clone())
+    mask = torch.clamp(torch.stack(mask), min=0.0, max=1.0)
+    assert not torch.isnan(mask).any()
+    assert mask.shape == (n_trains, H, W)
+    assert mask.amax(dim=(1,2)).size(dim=0) == n_trains and (mask.amax(dim=(1,2))>cutoff).all(), f"Shape: {mask.amax(dim=(1,2)).size(dim=0)}, Num Trains:{n_trains}, Err: {(mask.amax(dim=(1,2))>cutoff)}"
+    return mask, torch.tensor(boxes)
 
 
 def get_center(mask) -> np.array:
@@ -117,7 +158,7 @@ def np_readout(semi, conf_thresh=0.15):
     heatmap = np.reshape(heatmap, [Hc * CELL, Wc * CELL])
     #print('heatmap shape', heatmap.shape)
     xs, ys = np.where(heatmap >= conf_thresh)  # Confidence threshold.
-    return (xs,ys),heatmap
+    return (xs,ys), heatmap
     
 def quick_readout(pred_blocks, conf_thresh=0.15):
     shuffel = torch.nn.PixelShuffle(8)
@@ -263,9 +304,68 @@ def read_image(impath, img_size=(120, 160)):
 
 
 class MMRPifPafTune(Dataset):
+    """
+
+        target is of type dict and stores the different true values.
+        target['mask']: (N_Batch, Height, Width), float 0-1 if there is a train present.
+        target['fields']: (2, Height, Width), int, The closest centroid vector from each pixel. ToBe found out which channel of dim 0 ist height and width.
+    """
+
+    def __init__(self, root: Path, image_transforms=None, target_transforms=None, transforms=None, interpolation_threshold=130, debug=False):
+        self.debug = debug
+        self.field_scale_unit = 0.1 # check if a mean value of 1.1 of the field vectors is good.
+        if isinstance(root, str):
+            self.root = Path(root)
+        elif isinstance(root, Path):
+            self.root = root
+        self.transforms = transforms
+        self.image_transforms = image_transforms
+        self.target_transforms = target_transforms
+        self.mask_thresh = 0.3
+        self._load_annotations("data/model_trains.json")
+        with record_function("interp_masks"):
+            self._interp_masks(interpolation_threshold=interpolation_threshold)
+        with record_function("calc_centroid"):
+            self._calc_centroids()
+        self._calc_fields()
+        self.n_examples = len(self.labeldimages)
+        # print(self.masks['woodbridge_191.png'][0].max())
+
+    def _load_annotations(self, filename:str):
+        """Load prelabeled training data.
+        """
+        self.targets = {}
+        self.prelabled_images = []
+        with open(filename, encoding="utf-8") as fileptr:
+            dump = json.load(fileptr)
+        if '_via_img_metadata' in dump.keys():
+            dump = dump['_via_img_metadata']
+        file_struct = {"filename", "size", "regions", "file_attributes"}
+
+        for k, image in dump.items():
+            img_data = {}
+            assert set(dump[k].keys()) <= file_struct, f"File format err, got{set(dump.keys())}"
+            rects = list(
+                filter(lambda x: x["shape_attributes"]["name"] == "rect", image["regions"])
+            )
+            n_trains = int(image["file_attributes"]["n_trains"])
+            assert n_trains == len(rects), f"length mismatch in {k}. expected{n_trains}, got {len(rects)}"
+            #img_size = get_img_size()
+            im = cv2.imread(self.root / image["filename"])
+            H, W, C = im.shape
+            img_data['img_meta'] = (n_trains,H,W)
+            img_data['mask'], img_data['bbox'] = gen_mask(image["regions"], (H, W), n_trains)
+            self.targets[image["filename"]] = copy.deepcopy(img_data)
+            self.prelabled_images.append(image["filename"])
+        self.prelabled_images = sorted(self.prelabled_images.copy())
 
     @torch.no_grad()
     def _interp_masks(self, interpolation_threshold):
+        """
+        Assumes that original images have sequential file names.
+        [videoname]_[number].png
+        """
+        self.labeldimages = self.prelabled_images.copy()
         for i in range(len(self.prelabled_images) - 1):
             cur_img = self.prelabled_images[i]
             next_img = self.prelabled_images[i + 1]
@@ -285,163 +385,166 @@ class MMRPifPafTune(Dataset):
             if len(inter_frames) > interpolation_threshold:
                 # image gap too large
                 continue
-            source_img = self.pre_annotations[cur_img]
-            if self.pre_annotations[next_img].shape[0] != source_img.shape[0]:
+            source = self.targets[cur_img]
+            final = self.targets[next_img]
+            if source['img_meta'] != final['img_meta']:
+                print("Loss of Number trains, skipping")
+                continue
+            source_img = source['mask']
+            source_box = source['bbox']
+            if final['mask'].shape[0] != source_img.shape[0]:
                 # Todo interpt across varying masks number
                 continue
             spacing = len(inter_frames) + 1
-            img_diff = (self.pre_annotations[next_img] - source_img) / spacing
+            img_diff = (final['mask'] - source_img) / spacing
+            box_diff = (final['bbox'] - source_box) / spacing
+            N, H, W = source_img.shape
             with record_function("iter_steps"):
                 for step in range(1, spacing):
-                    self.masks[inter_frames[step - 1]] = source_img + img_diff * step
+                    img_data = {}
+                    img_data['mask'] = torch.clamp(source_img + img_diff * step, min=0.0, max=1.0)
+                    img_data['bbox'] = source_box + box_diff * step
+                    img_data['img_meta'] = (N, H, W)
+                    self.targets[inter_frames[step - 1]] = copy.deepcopy(img_data)
+                    self.labeldimages.append(inter_frames[step - 1])
+            self.labeldimages = sorted(self.labeldimages)
 
     @torch.no_grad()
-    def _calc_centroid(self):
-        new_masks = {}
-        y_index = torch.arange(self.internal_size[0]).double()
-        x_index = torch.arange(self.internal_size[1]).double()
-        vector_field = (
-            torch.cartesian_prod(y_index, x_index).reshape(2, 640, 480).double() #magic numbers 640, 480
-        )
-        centroids = []
-        self.fields = {}
-        for k, mask in self.masks.items():
-            with record_function("resize_mask"):
-                mask = mask[None, :, :]
-                mask = torch.squeeze(
-                    torch.nn.functional.interpolate(mask, size=self.internal_size), 0
-                )
+    def _calc_centroids(self, mode:str='bbox'):
+        """
+        Calculate centroid for each entity. Either with mask mean or bbox center
+        """
+        if mode not in ['bbox', 'mask']:
+            raise RuntimeWarning(f"Selected mode {mode} is not supported, switching to bbox")
+        for img_id in self.labeldimages:
+            if mode == 'bbox':
+                # get for each image the bbox
+                # calc centroid
+                # add centroids to img_data target
+                boxes = self.targets[img_id]['bbox'] # (N,4) XXYY
+                X,Y = (boxes[:,0]+boxes[:,1])/2, (boxes[:,2]+boxes[:,3])/2
+                # centroids = torch.stack((X,Y)) # (2,N)
+                centroids = torch.stack((X,Y)).T # (N,2)
+                assert centroids.shape[0] == self.targets[img_id]['img_meta'][0], f"got {centroids.shape[0]}, expected {self.targets[img_id]['img_meta'][0]}"
+                self.targets[img_id]['centroids'] = centroids.clone()
+            elif mode == 'mask':
+                raise NotImplementedError(f"Selected mode {mode} is not implemented")
+            else:
+                raise RuntimeError("Wrong Exec Path")
+    @staticmethod
+    def get_maskid_lookup(mask):
+        """
+        creates an reverse lookup table for pixel to mask id
+        """
+        N,H,W = mask.shape
+        b = torch.nonzero(mask)
+        out = torch.full((H,W), -1, dtype=int)
+        for n in range(N):
+            out[b[b[:,0]==n,1:3]] = n
+        return out
 
-            area = mask.sum(dim=(1, 2))
-            with record_function("get_centroid"):
-                # maybe i should store them
-                y_center = torch.matmul(mask.sum(dim=2), y_index) / area
-                x_center = torch.matmul(mask.sum(dim=1), x_index) / area
-                kpts = torch.stack((y_center, x_center))
-                kpts = torch.unsqueeze(kpts.T, 0)
-            del y_center
-            del x_center
-            m_mask = mask.max(dim=0).values
-            img_cords = torch.nonzero(m_mask)[None, :, :]
-            with record_function("calc_NN"):
-                dist = torch.cdist(img_cords.double(), kpts)
-                pixel_entity_assigment = dist.squeeze().min(dim=1).indices
-            # for each pixel in image calc vector to centroid
-            # vector are coordinates
-            # non relevant pixels have a vector to self/length 0
+    @staticmethod
+    def _gen_field(img_dim:Tuple[int,int,int], centroid:Tuple[int,int]) -> torch.Tensor:
+        """
+        Generate an attraction field for a centroid.
+        img_dim: (H,W)
+        centroid: (X,Y)
+        return Tensor (N,H,W,2)
+        """
+        N,H,W = img_dim
+        y_index = torch.arange(H, dtype=torch.int)
+        x_index = torch.arange(W, dtype=torch.int)
+        vector_field = torch.cartesian_prod(y_index, x_index).reshape(H, W, 2)
+        vector_field = vector_field.repeat(N,1,1,1)
+        #cntr = torch.tensor((centroid[1], centroid[0]))
+        #cntr_field = torch.flip(centroid, (1,))[:,None,None,:].repeat(1,H,W,1)
+        cntr_field = centroid[:,None,None,:].repeat(1,H,W,1)
+        return torch.sub(cntr_field, vector_field)
 
-            idx = img_cords[0].T
-            with record_function("assign_field"):
-                tmp_field = vector_field.detach().clone()
-                #print(kpts[0, pixel_entity_assigment])
-                #print('kpts[0, pixel_entity_assigment] shape', kpts[0, pixel_entity_assigment].shape)
-                tmp_field[:,idx[0], idx[1]] = kpts[0, pixel_entity_assigment].T
-                self.fields[k] = tmp_field.float()
-                del tmp_field
-            new_masks[k] = mask.float()
-        self.masks = new_masks
+    @staticmethod
+    def norm_fields(fields, step_unit) -> torchvision.tv_tensors.Image:
+        """
+        args
+            fields: Tensor (H,W,2)
+        return Tensor (2,H,W)
+        """
+        if fields.dim() != 3:
+            raise AttributeError("Need 3D Tensor")
+        if step_unit.shape != (2,):
+            raise AttributeError(f"Norming unit is not a unit for each dim, got {step_unit.shape}")
+        out_field = torch.div(fields, step_unit)
+        return torchvision.tv_tensors.Image(torch.movedim(out_field,(0,1,2),(1,2,0)))
 
     @torch.no_grad()
-    def _process_points(self):
-        # access image->generate keypoints-> associate keypoints to mask
-        if os.path.isfile("keypointlist.ph"):
-            keypoints_list = torch.load("keypointlist.ph", weights_only=False)
-            keypoint_embeds = torch.load("keypoint_embeds.ph", weights_only=False)
-            assert len(keypoints_list) == len(self)
-            assert len(keypoint_embeds) == len(self)
-        else:
-            keypoints_list = []
-            keypoint_embeds = []
-            for idx in range(len(self)):
-                img_nameid = self.image_instances[idx]
-                img_path = self.root / img_nameid
-                image = read_image(img_path, img_size=self.internal_size)
-                # show_np(image)
-                pts, desc, heatmap = gen_keypoints(
-                    image, self.model, conf_thresh=0.025, nms_dist=4
-                )
-                pts = torch.from_numpy(pts[0:2]).int()
-                pts = torch.reshape(pts.T, (1, -1, 2))
-                keypoints_list.append(pts)
-                keypoint_embeds.append(torch.from_numpy(desc))
-            torch.save(keypoints_list, "keypointlist.ph")
-            torch.save(keypoint_embeds, "keypoint_embeds.ph")
-        self.keypoints = keypoints_list
-        self.keypoint_embeds = keypoint_embeds
+    def _calc_fields(self, treshold:float=0.3):
+        """
+        uses the centroids to create a basic attraction field for each pixel.
+        Overrites with mask attraction.
+        """
+        if treshold < 0.0 or treshold > 1.0:
+            treshold = 0.3
+            raise UserWarning("Treshold set out of bounds, defaulting to 0.3")
+        for image_id in self.labeldimages:
+            target = self.targets[image_id]
+            N, H, W = target['img_meta']
+            STEP_UNIT = torch.Tensor([H*self.field_scale_unit, W*self.field_scale_unit])
+            field = self._gen_field(target['img_meta'], target['centroids'])
+            assert field.shape == (N,H,W,2)
 
-    def __init__(self, root: Path, image_transforms=None, target_transforms=None, transforms=None, interpolation_threshold=150, debug=False):
-        self.debug = debug
-        if isinstance(root, str):
-            self.root = Path(root)
-        elif isinstance(root, Path):
-            self.root = root
-        self.transforms = transforms
-        self.image_transforms = image_transforms
-        self.target_transforms = target_transforms
-        with record_function("process_annotations"):
-            self.pre_annotations = process_json_annotations(
-                "data/coco_fix_json(1).json"
-            )
-        self.prelabled_images = sorted(self.pre_annotations.keys())
-        self.masks = (
-            self.pre_annotations
-        )
-        self.internal_size = (640, 480)
-        with record_function("interp_masks"):
-            self._interp_masks(interpolation_threshold=interpolation_threshold)
-        with record_function("calc_centroid"):
-            self._calc_centroid()
-        self.image_instances = sorted(self.masks.keys())
-        self.n_examples = len(self.image_instances)
-        # print(self.masks['woodbridge_191.png'][0].max())
-        weights_path = "./zoo/SuperPointPretrainedNetwork/superpoint_v1.pth"
-        with record_function("load_model"):
-            self.model = SuperPointNet()
-            self.model.load_state_dict(
-                torch.load(weights_path, map_location=lambda storage, loc: storage)
-            )
-            self.model.eval()
-        with record_function("process_points"):
-            # listing of pregenerated keypoint locations for each image and their lable according to the mask
-            self._process_points()
+            b = torch.linalg.vector_norm(field, dim=3)
+            b = torch.argmin(b, 0)
+
+            idx_mask = target['mask'] >= treshold
+            raw_mask = target['mask'].amax(dim=0) # lower the agressivemess
+            assert raw_mask.shape == (H,W)
+            assert idx_mask.shape == (N,H,W)
+            for n in range(N):
+                b[idx_mask[n]] = n
+            # TODO make is such b also gets the indexes from the mask as overrites
+            out_field = torch.zeros((H,W,2))
+            for n in range(N):
+                #tmp_pmask = field[n, b == n & idx_mask[n]]
+                #out_field[b == n & idx_mask[n]] = tmp_pmask
+                #tmp_nmask = field[n, b == n & ~idx_mask[n]]
+                #tmp_nmask *= 0.4
+                #out_field[b == n & ~idx_mask[n]] = tmp_nmask
+                out_field[b == n] = field[n, b == n]
+
+            assert out_field.shape == (H,W,2)
+
+            out_field = torch.mul(out_field, raw_mask[:,:,None])
+            self.targets[image_id]['fields'] = self.norm_fields(out_field, STEP_UNIT)
 
     def __len__(self):
         return self.n_examples
 
     def __getitem__(self, idx):
-        img_nameid = self.image_instances[idx]
+        img_nameid = self.labeldimages[idx]
         img_path = self.root / img_nameid
-        image = decode_image(img_path, mode='RGB')
-        with torch.no_grad():
-            image = v2.functional.resize(
-                image, self.internal_size
-            )
+        image = tv_tensors.Image(decode_image(img_path, mode='RGB'))
         target = {}
-        mask = self.masks[img_nameid]  # .max(axis=0).values
+        loc_target = self.targets[img_nameid]
+        mask = tv_tensors.Mask(loc_target['mask'] >= self.mask_thresh)  # .max(axis=0).values
 
         if self.debug:
-            pts = self.keypoints[idx].squeeze()
-            lpts = torch.reshape(pts.T, (2, -1))
-            labels = mask[:, lpts[1], lpts[0]]
-            target["poi"] = pts#.unsqueeze(0)   # nts_of_interest
-            target["labels"] = labels#.unsqueeze(0) #== the mask
             target["image_id"] = img_nameid
             target['mask'] = mask
-            target['bbox'] = masks_to_boxes(mask)
+            target['centroid'] = tv_tensors.KeyPoints(loc_target['centroids'], canvas_size=mask.shape[-2:])
+            target['bbox'] = tv_tensors.BoundingBoxes(masks_to_boxes(mask), format=tv_tensors.BoundingBoxFormat.XYXY, canvas_size=mask.shape[-2:])
         else:
-            target['mask'] = torch.amax(mask,0, keepdim=True)#.unsqueeze(0) 
+            target['mask'] = torch.amax(mask, 0, keepdim=True) #.unsqueeze(0)
         #target['mask'] = mask
-        target["fields"] = self.fields[img_nameid]#.unsqueeze(0) 
-        #target["masks"] = tv_tensors.Mask(self.masks[img_nameid])
+        target["fields"] = loc_target['fields']#.unsqueeze(0)
+        #target["masks"] = torchvision.tv_tensors.Mask(self.masks[img_nameid])
         if self.image_transforms:
             image = self.image_transforms(image)
         if self.target_transforms:
             target = self.target_transforms(target)
         if self.transforms:
-            image = self.transforms(image)
-            target['mask'] = self.transforms(target['mask'])
-            target['fields'] = self.transforms(target['fields'])
-            target['bbox'] = self.transforms(target.get('bbox'))
+            image, target = self.transforms(image, target)
+            #target['mask'] = self.transforms(target['mask'])
+            #target['fields'] = self.transforms(target['fields'])
+            #target['bbox'] = self.transforms(target.get('bbox'))
         return image, target
 
 class MMRFineTune(Dataset):
@@ -495,7 +598,7 @@ class MMRFineTune(Dataset):
             labels = torch.zeros((num_objs,), dtype=torch.int64)
         area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0])
         target = {}
-        target["boxes"] = torchvision.tv_tensors.BoundingBoxes(
+        target["boxes"] = tv_tensors.BoundingBoxes(
             boxes, format="XYXY", canvas_size=(h, w)
         )
 

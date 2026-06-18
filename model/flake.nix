@@ -38,6 +38,8 @@
           pythonPackages.torch
           pythonPackages.torchvision
           pythonPackages.jupyter
+          #pythonPackages.jupyter-contrib-core
+          #pythonPackages.jupyter-nbextensions-configurator
         ];
 
         # Run this command, only after creating the virtual environment

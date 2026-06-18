@@ -181,4 +181,4 @@ const TrackEntities = union(EntityType) {
     sensor: Sensor,
     balise: Sensor,
     train: Train
-}
+};

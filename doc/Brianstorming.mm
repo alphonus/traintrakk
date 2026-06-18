@@ -1,9 +1,12 @@
 <map version="freeplane 1.12.1">
 <!--To view this file, download free mind mapping software Freeplane from https://www.freeplane.org -->
+<bookmarks>
+    <bookmark nodeId="ID_696401721" name="Wurzel-Knoten" opensAsRoot="true"/>
+</bookmarks>
 <node TEXT="Detection Model" FOLDED="false" ID="ID_696401721" CREATED="1610381621824" MODIFIED="1751030509863" STYLE="oval">
 <font SIZE="18"/>
 <hook NAME="MapStyle" zoom="0.9090909">
-    <properties edgeColorConfiguration="#808080ff,#ff0000ff,#0000ffff,#00ff00ff,#ff00ffff,#00ffffff,#7c0000ff,#00007cff,#007c00ff,#7c007cff,#007c7cff,#7c7c00ff" show_tags="UNDER_NODES" associatedTemplateLocation="template:/standard-1.6.mm" fit_to_viewport="false" show_icons="BESIDE_NODES"/>
+    <properties edgeColorConfiguration="#808080ff,#ff0000ff,#0000ffff,#00ff00ff,#ff00ffff,#00ffffff,#7c0000ff,#00007cff,#007c00ff,#7c007cff,#007c7cff,#7c7c00ff" show_tags="UNDER_NODES" associatedTemplateLocation="template:/standard-1.6.mm" fit_to_viewport="false" show_icons="BESIDE_NODES" show_note_icons="true" show_icon_for_attributes="true" showTagCategories="false"/>
     <tags category_separator="::"/>
 
 <map_styles>
@@ -73,7 +76,7 @@
 </stylenode>
 </map_styles>
 </hook>
-<hook NAME="AutomaticEdgeColor" COUNTER="7" RULE="ON_BRANCH_CREATION"/>
+<hook NAME="AutomaticEdgeColor" COUNTER="8" RULE="ON_BRANCH_CREATION"/>
 <node TEXT="Scope" POSITION="bottom_or_right" ID="ID_961084349" CREATED="1751030496068" MODIFIED="1751030509859" HGAP_QUANTITY="53.75 pt" VSHIFT_QUANTITY="-148.5 pt">
 <edge COLOR="#ff0000"/>
 <node TEXT="1. Detection of individual train waggons" ID="ID_1965524896" CREATED="1751030502876" MODIFIED="1751030543514"/>
@@ -161,7 +164,7 @@
 <node TEXT="U-net like" ID="ID_1020494728" CREATED="1751281191204" MODIFIED="1751281201164"/>
 </node>
 </node>
-<node TEXT="Tasks" POSITION="top_or_left" ID="ID_434817489" CREATED="1751034255293" MODIFIED="1751034256980">
+<node TEXT="Tasks" FOLDED="true" POSITION="top_or_left" ID="ID_434817489" CREATED="1751034255293" MODIFIED="1751034256980">
 <edge COLOR="#00ffff"/>
 <node TEXT="create training data" ID="ID_389933166" CREATED="1751034258225" MODIFIED="1751034264242">
 <node TEXT="supervised" ID="ID_104061711" CREATED="1751034359995" MODIFIED="1751034365969">
@@ -202,16 +205,23 @@
 <node TEXT="Run masked images through network saving the keypoints" ID="ID_258953007" CREATED="1755855952260" MODIFIED="1755855968811">
 <node TEXT="save generated keypoints" ID="ID_1242605529" CREATED="1755863734028" MODIFIED="1755863740609"/>
 <node TEXT="integrate keypoints into dataset format" ID="ID_1879699870" CREATED="1755863741336" MODIFIED="1755863750929"/>
+<node TEXT="validiert" ID="ID_222367048" CREATED="1758109745639" MODIFIED="1758132323471">
+<node TEXT="borders very strict" ID="ID_674031398" CREATED="1758132326677" MODIFIED="1758132339920"/>
+<node TEXT="discontinous" ID="ID_671344245" CREATED="1758132340186" MODIFIED="1758132343806"/>
+<node TEXT="evtl. 2d-gausian smoothing (max) with unitvectors" ID="ID_1229481615" CREATED="1758132344026" MODIFIED="1758132367378"/>
+</node>
 </node>
 </node>
 <node TEXT="2. interpolate existing masks to neigbhors" ID="ID_394435942" CREATED="1755855598028" MODIFIED="1755855620103">
 <node TEXT="identify keyframes with existing annotations" ID="ID_1317113615" CREATED="1755856527231" MODIFIED="1755856544515"/>
 <node TEXT="get linear interpolation" ID="ID_520688605" CREATED="1755856749834" MODIFIED="1755856758431"/>
 <node TEXT="generate vector fields" ID="ID_1369347518" CREATED="1756913904489" MODIFIED="1756913910288">
-<node TEXT="calculate centroid of mask" ID="ID_811948204" CREATED="1756913912416" MODIFIED="1756913923142"/>
-<node TEXT="one field for all entities" ID="ID_872336375" CREATED="1756914101267" MODIFIED="1756914109288"/>
+<node TEXT="calculate centroid of mask" ID="ID_811948204" CREATED="1756913912416" MODIFIED="1763820017661" COLOR="#00ff00"/>
+<node TEXT="one field for all entities [later]" ID="ID_872336375" CREATED="1756914101267" MODIFIED="1763820071573">
+<node TEXT="at first check if a point finds ANY entity" ID="ID_1043455528" CREATED="1763820071977" MODIFIED="1763820084904"/>
 </node>
-<node TEXT="" ID="ID_399492374" CREATED="1756914096538" MODIFIED="1756914096538"/>
+</node>
+<node TEXT="Only 2 nodes per wagon, use fields [moved to later]" ID="ID_399492374" CREATED="1756914096538" MODIFIED="1763819983948" COLOR="#ff3333"/>
 </node>
 <node TEXT="3. apply pifpaf method" ID="ID_1330682327" CREATED="1755855620878" MODIFIED="1755855632891">
 <node TEXT="regression error to vector fields" ID="ID_181343163" CREATED="1756913872514" MODIFIED="1756914124143"/>
@@ -219,6 +229,15 @@
 <node TEXT="fine tune model using classification for vector fields" ID="ID_54212834" CREATED="1756913881703" MODIFIED="1756913902006"/>
 </node>
 </node>
+</node>
+</node>
+<node TEXT="Fixes" POSITION="top_or_left" ID="ID_269127242" CREATED="1770891912098" MODIFIED="1770891918409">
+<edge COLOR="#007c00"/>
+<node TEXT="check what dataformat the model needs 0-255, 0-1 or -1-1" ID="ID_1377283344" CREATED="1770891919705" MODIFIED="1770891953024">
+<node TEXT="create visualisation software for it" ID="ID_945155043" CREATED="1770891954974" MODIFIED="1770891961675"/>
+</node>
+<node TEXT="check that the zero pts returns are processed correctly, no faulty data processing" ID="ID_298190083" CREATED="1770891971246" MODIFIED="1770891999646">
+<node TEXT="handle zero returns" ID="ID_1348949767" CREATED="1770892000466" MODIFIED="1770892004970"/>
 </node>
 </node>
 </node>
