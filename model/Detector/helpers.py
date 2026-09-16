@@ -5,10 +5,11 @@ from torchvision.utils import draw_bounding_boxes, draw_segmentation_masks
 from torchvision import tv_tensors
 from torchvision.transforms import v2
 from torchvision.transforms.v2 import functional as F
+import torchvision
 
 plt.rcParams["savefig.bbox"] = "tight"
 
-def draw_keypoints(image: torch.Tensor, keypoints: torch.Tensor) -> torch.Tensor:
+def draw_keypoints(image: torch.Tensor, keypoints: torch.Tensor, **kwargs) -> torch.Tensor:
     if not isinstance(image, torch.Tensor):
         raise TypeError(f"The image must be a tensor, got {type(image)}")
     elif not (image.is_floating_point() or image.dtype == torch.uint8) :
@@ -18,10 +19,11 @@ def draw_keypoints(image: torch.Tensor, keypoints: torch.Tensor) -> torch.Tensor
     elif keypoints.dim() !=3:
         raise ValueError(f"Expected Keypoints of shape (num_instances, K, 2), not {keypoints.shape}")
     if image.shape[0] == 1:
-        img = torchvision.transforms.v2.functional.grayscale_to_rgb(image)
+        img = F.grayscale_to_rgb(image)
     else:
         img = image
-    return torchvision.utils.draw_keypoints(img, keypoints, colors='red', radius=3)
+    col = kwargs.get('colors','red')
+    return torchvision.utils.draw_keypoints(img, keypoints, colors=col, radius=3)
 
 def show(imgs: List[torch.Tensor]|torch.Tensor):
     if not isinstance(imgs, list):
@@ -39,7 +41,7 @@ def show(imgs: List[torch.Tensor]|torch.Tensor):
 def visualize_centroids(image: torch.Tensor, centroids: torch.Tensor) -> torch.Tensor:
     match image.shape:
         case (1,_,_):
-            img = torchvision.transforms.v2.functional.grayscale_to_rgb(image.detach())
+            img = F.grayscale_to_rgb(image.detach())
         case (3,_,_):
             img = image.copy().detach()
         case _:
@@ -85,7 +87,7 @@ def test_decom_draw_segmentation_masks(image: torch.Tensor, masks: torch.Tensor,
         for color in _generate_color_palette(num_masks)
     ]
     if image.size()[0] == 1:
-        img_to_draw = torchvision.transforms.v2.functional.grayscale_to_rgb(image.detach().clone())
+        img_to_draw = F.grayscale_to_rgb(image.detach().clone())
     elif image.size()[0] == 3:
         img_to_draw = image.detach().clone()
     else:
@@ -101,21 +103,24 @@ def test_decom_draw_segmentation_masks(image: torch.Tensor, masks: torch.Tensor,
     return out.to(torch.uint8)#to(original_dtype) hardcode the image format to [0,255]
 
 @torch.no_grad()
-def viz_dataset(image: torch.Tensor|Tuple, target: Dict=None, kpts: List|torch.Tensor=None):
+def viz_dataset(image: torch.Tensor|Tuple, target: Dict=None, kpts: List|torch.Tensor=None, color='red') -> torch.Tensor:
     img = None
     mask = boxes = None
     mres = bres = None
     if isinstance(image, tuple):
         img, target = image
+        img = img.detach().clone()
     else:
-        img = image.detach()
+        img = image.detach().clone()
+    if img.dim() == 4 and img.shape[0]==1:
+        img = img[0]
     if target is not None:
         mask = target.get('mask')
         boxes = target.get('bbox')
     if img.max().item() > 1.0:
         img = img.to(torch.uint8)
     if img.shape[0] == 1:
-        img = torchvision.transforms.v2.functional.grayscale_to_rgb(img)
+        img = F.grayscale_to_rgb(img)
     assert img.dim() == 3 and img.shape[0] == 3, img.shape
     if mask is not None:
         mres = draw_segmentation_masks(img, mask, alpha=0.8)
@@ -124,14 +129,14 @@ def viz_dataset(image: torch.Tensor|Tuple, target: Dict=None, kpts: List|torch.T
         #y_centers = torch.stack(((boxes[:,0]+boxes[:,2])/2, (boxes[:,1]+boxes[:,3])/2)).T.reshape((-1,1,2))
         #bres = draw_keypoints(bres, y_centers)
     kpts_vis = []
+    #img_to_draw = img
     if isinstance(kpts, torch.Tensor):
-        kpts_vis.append(draw_keypoints(img.detach().clone(), kpts))
-    elif isinstance(kpts, list):
-        for i in kpts:
-            kpts_vis.append(draw_keypoints(img.detach().clone(), i))
+        kpts_vis.append(draw_keypoints(img, kpts, colors=color))
+    #elif isinstance(kpts, list):
+    #    for i in kpts:temp remove
+    #        kpts_vis.append(draw_keypoints(img_to_draw, i, colors=color))
     out = [mres, bres, *kpts_vis]
-    out = [x for x in out if x is not None]
-    show(out)
+    return [x for x in out if x is not None]
 
 def test_decom_plot(imgs, row_title=None, bbox_width=3, **imshow_kwargs):
     if not isinstance(imgs, list):

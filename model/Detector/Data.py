@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 import math
 import copy
+import random
 
 import cv2
 import numpy as np
@@ -29,7 +30,7 @@ from torchvision.transforms import v2
 from torchvision.ops import masks_to_boxes
 from torch.distributions.normal import Normal
 
-from zoo.SuperPointPretrainedNetwork.demo_superpoint import SuperPointNet
+from .zoo.SuperPointPretrainedNetwork.demo_superpoint import SuperPointNet
 
 
 def process_json_annotations(filename: str, imgroot: Path) -> List:
@@ -481,6 +482,7 @@ class MMRPifPafTune(Dataset):
         uses the centroids to create a basic attraction field for each pixel.
         Overrites with mask attraction.
         """
+        #TODO rewite to dim:(2,H,W)
         if treshold < 0.0 or treshold > 1.0:
             treshold = 0.3
             raise UserWarning("Treshold set out of bounds, defaulting to 0.3")
@@ -552,63 +554,72 @@ class MMRFineTune(Dataset):
     def istrain(path: Path) -> bool:
         return path.parts[-2].contains("train")
 
-    def __init__(self, root: Path, transform=None):
+    def __init__(self, root: Path, transforms=None):
         if isinstance(root, str):
             self.root = Path(root)
         elif isinstance(root, Path):
             self.root = root
-        self.transform = transform
+        self.transforms = transforms
         self.other_list = list(self.root.glob("other/*.jpg"))
         self.train_list = list(self.root.glob("train/*.jpg"))
-        ds = load_dataset("zh-plus/tiny-imagenet")
-        self.contrast = ds["train"]
-        self.max_contrast = 0  # max num of contrast samples
+        ds = load_dataset("zh-plus/tiny-imagenet", split='train')
+        self.contrast = ds
+        self.max_contrast = 100  # max num of contrast samples
+        contrast_train_mask = list(map(lambda x: x==75 or x==95, ds['label']))
+        self.contrast_train_idx = [i for i,x in enumerate(contrast_train_mask) if x]
+        self.contrast_other_idx = [i for i,x in enumerate(contrast_train_mask) if not x]#RANDOM IDX from ds
+        self.contrast_train_idx = random.sample(self.contrast_train_idx, self.max_contrast)
+        self.contrast_other_idx = random.sample(self.contrast_other_idx, self.max_contrast)
         self.n_other = len(self.other_list)
         self.n_train = len(self.train_list)
 
     def __len__(self):
-        return self.max_contrast + self.n_other + self.n_train
+        return self.max_contrast*2 + self.n_other + self.n_train
 
     def __getitem__(self, idx):
         if idx < self.max_contrast:
-            image = v2.functional.pil_to_tensor(
-                self.contrast[idx]["image"]
-            )
+            masked_idx = self.contrast_other_idx[idx]
+            with record_function("get_contrast"):
+                image = v2.functional.pil_to_tensor(
+                    self.contrast[masked_idx]['image']
+                )
             is_train = False
-        elif idx < self.max_contrast + self.n_other:
-            img_path = self.other_list[idx - self.max_contrast]
+        elif idx < self.max_contrast*2:
+            masked_idx = self.contrast_train_idx[idx - self.max_contrast]
+            with record_function("get_contrast"):
+                image = v2.functional.pil_to_tensor(
+                    self.contrast[masked_idx]['image']
+                )
+            is_train = True
+        elif idx < self.max_contrast*2 + self.n_other:
+            img_path = self.other_list[idx - self.max_contrast*2]
             image = decode_image(img_path)
             is_train = False
         else:
-            img_path = self.train_list[idx - self.max_contrast - self.n_other]
+            img_path = self.train_list[idx - self.max_contrast*2 - self.n_other]
             image = decode_image(img_path)
             is_train = True
 
         num_objs = 1
         _, h, w = image.shape
-        boxes = torch.zeros((num_objs, 4), dtype=torch.float)
-        boxes[0, 0] = math.floor(w * 0.1)
-        boxes[0, 1] = math.floor(h * 0.1)
-        boxes[0, 2] = math.floor(w * 0.9)
-        boxes[0, 3] = math.floor(h * 0.9)
 
         if is_train:
-            labels = torch.ones((num_objs,), dtype=torch.int64)
+            labels = 1#torch.ones((num_objs,), dtype=torch.int64)
         else:
-            labels = torch.zeros((num_objs,), dtype=torch.int64)
-        area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0])
+            labels = 0#torch.zeros((num_objs,), dtype=torch.int64)
+        #area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0])
         target = {}
-        target["boxes"] = tv_tensors.BoundingBoxes(
-            boxes, format="XYXY", canvas_size=(h, w)
-        )
+        #target["boxes"] = tv_tensors.BoundingBoxes(
+        #    boxes, format="XYXY", canvas_size=(h, w)
+        #)
 
-        target["masks"] = tv_tensors.Mask(masks)
+        #target["masks"] = tv_tensors.Mask(masks)
         target["labels"] = labels
         target["image_id"] = idx
-        target["area"] = area
-
-        if self.transforms is not None:
-            image, target = self.transforms(image, target)
+        #target["area"] = area
+        with record_function("transform"):
+            if self.transforms is not None:
+                image, target = self.transforms(image, target)
         return image, target
 
 

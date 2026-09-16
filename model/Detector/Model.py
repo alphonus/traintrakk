@@ -1,5 +1,12 @@
+import torch
+import torch.nn.functional as F
+from torchvision.models.feature_extraction import (create_feature_extractor,
+                                                   get_graph_node_names)
+from .zoo.SuperPointPretrainedNetwork.demo_superpoint import (
+    SuperPointFrontend, SuperPointNet)
+from pathlib import Path
 
-class MultiHeadAttention(nn.Module):
+class MultiHeadAttention(torch.nn.Module):
     """
     Computes multi-head attention. Supports nested or padded tensors.
 
@@ -117,61 +124,63 @@ class MultiHeadAttention(nn.Module):
 
         return attn_output
 
+try:
+    import lightning as L
+    class VectorHead(L.LightningModule):
+        def _get_clf_model(self, config):
+            model = torch.nn.Sequential(
+                Superpoint.convPa, torch.nn.Relu(), Superpoint.convPb
+            )
+            model.load_statedict
+            return model
 
-class VectorHead(L.LightningModule):
-    def _get_clf_model(self, config):
-        model = torch.nn.Sequential(
-            Superpoint.convPa, torch.nn.Relu(), Superpoint.convPb
-        )
-        model.load_statedict
-        return model
+        def _get_regress_model(self, config):
+            return torch.nn.Sequential(
+                nn.Linear(config.regressor.in_dim, config.regressor.in_dim),
+                nn.ReLU(),
+                nn.Linear(config.regressor.in_dim, config.regressor.out_dim),
+            )
 
-    def _get_regress_model(self, config):
-        return torch.nn.Sequential(
-            nn.Linear(config.regressor.in_dim, config.regressor.in_dim),
-            nn.ReLU(),
-            nn.Linear(config.regressor.in_dim, config.regressor.out_dim),
-        )
+        # def _get_processor_model(self, config):
+        #    mha_layer = MultiHeadAttention(**config.processor)
+        #    return torch.compile(mha_layer)
 
-    # def _get_processor_model(self, config):
-    #    mha_layer = MultiHeadAttention(**config.processor)
-    #    return torch.compile(mha_layer)
+        def __init__(backbone, config):
+            super().__init__()
+            self.backbone = backbone
+            # self.processor = self._get_processor_model(config)
+            self.regressor = self._get_regress_model(config)
+            self.clf = self._get_clf_model(config)
 
-    def __init__(backbone, config):
-        super().__init__()
-        self.backbone = backbone
-        # self.processor = self._get_processor_model(config)
-        self.regressor = self._get_regress_model(config)
-        self.clf = self._get_clf_model(config)
+        def forward(self, x):
+            # inputs, target = batch
+            with torch.no_grad():
+                embeds = self.backbone(x)
+            # new_embeds = self.processor(embeds, pts, embeds)
+            pts = self.clf(embeds)
+            mask < -pts
+            vectors = self.regressor(new_embeds, mask)
 
-    def forward(self, x):
-        # inputs, target = batch
-        with torch.no_grad():
-            embeds = self.backbone(x)
-        # new_embeds = self.processor(embeds, pts, embeds)
-        pts = self.clf(embeds)
-        mask < -pts
-        vectors = self.regressor(new_embeds, mask)
+            return pts, embeds, vectors, classif
 
-        return pts, embeds, vectors, classif
+        def training_step(self, batch, batch_idx):
+            # training_step defines the train loop.
+            x, target = batch
+            x = x.view(x.size(0), -1)
+            pts, embeds, vectors, classif = self(s)
+            loss_vector = F.hinge_loss(vectors, target["vectors"])
+            loss_clf = F.cross_entropy(
+                classif,
+            ) + F.l1_loss(
+                vectors,
+            )
+            return loss
 
-    def training_step(self, batch, batch_idx):
-        # training_step defines the train loop.
-        x, target = batch
-        x = x.view(x.size(0), -1)
-        pts, embeds, vectors, classif = self(s)
-        loss_vector = F.hinge_loss(vectors, target["vectors"])
-        loss_clf = F.cross_entropy(
-            classif,
-        ) + F.l1_loss(
-            vectors,
-        )
-        return loss
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
-        return optimizer
-
+        def configure_optimizers(self):
+            optimizer = torch.optim.Adam(self.parameters(), lr=1e-3)
+            return optimizer
+except ModuleNotFoundError:
+    pass
 
 def gen_config(in_dim: int, nheads: int = 5):
     proc_conf_dict = {
@@ -236,24 +245,24 @@ def get_model_traindetector(num_classes=2, dropout=0.2):
     return model
 
 
-class MRRPointDetector(nn.Module):
+class MRRPointDetector(torch.nn.Module):
     def __init__(self, run_config: Dict):
         super(MRRPointDetector, self).__init__()
         self.config = run_config
-        weights_path = "./zoo/SuperPointPretrainedNetwork/superpoint_v1.pth"
+        weights_path = Path("./Detector/zoo/SuperPointPretrainedNetwork/superpoint_v1.pth")
         model = SuperPointNet()
         model.load_state_dict(
                 torch.load(weights_path, map_location=lambda storage, loc: storage)
             )
         #model = model.float()
-        self.detector = create_feature_extractor(model, {'convPb':'detector','conv4b':'hidden'})
-        self.regressor = [#torch.nn.Sequential(
+        self.detector = create_feature_extractor(model, {'convPb':'detector','conv4b':'hidden', 'convDb':'descriptor'})
+        self.regressor = torch.nn.Sequential(
             torch.nn.Conv2d(128, 256, 3, stride=1, padding=1),
-            torch.nn.Hardswish(inplace=True),
-            torch.nn.Dropout(p=self.config['dropout'], inplace=True),
+            torch.nn.Hardswish(), #inplace=True
+            #torch.nn.Dropout(p=self.config['dropout'], inplace=True),
             #torch.nn.Linear(256, 2),
             torch.nn.Conv2d(256, 8*8*2, 1, stride=1, padding=0),
-        ]#)
+        )
 
         self.shuffel = torch.nn.PixelShuffle(8)
         self.unshuffel = torch.nn.PixelUnshuffle(8)
@@ -278,12 +287,31 @@ class MRRPointDetector(nn.Module):
         #print('dense',dense.shape)
         #confidents = dense[:,X_pos, Y_pos]
 
-        fields = self.regressor[0](out['hidden'])
-        #print(fields.shape)
-        fields = self.regressor[1](fields)
-        #fields = self.regressor[2](fields)
-        fields = self.regressor[3](fields)#torch.transpose(fields,1,3))
-
+        fields = self.regressor(out['hidden'])
         fields = self.shuffel(fields)
         fields = fields[:, :, Y_pos, X_pos].transpose(1,2)
         return idx, dense, fields
+class RawMMRDetector(MRRPointDetector):
+    def __init__(self, run_config: Dict):
+        super(RawMMRDetector, self).__init__(run_config)
+        dropout = run_config.get('dropout', 0.1)
+        self.classif = torch.nn.Sequential(
+            torch.nn.Linear(128 * 7 * 7, 128),
+            torch.nn.ReLU(True),
+            torch.nn.Dropout(p=dropout),
+            torch.nn.Linear(128, 128),
+            torch.nn.ReLU(True),
+            torch.nn.Dropout(p=dropout),
+            torch.nn.Linear(128, 1),
+        )
+        self.pool = torch.nn.AdaptiveAvgPool2d((7,7))
+    def forward(self, image):
+        out = self.detector(image)
+        dn = torch.norm(out['hidden'], p=2, dim=1) # Compute the norm.
+        desc = out['hidden'].div(torch.unsqueeze(dn, 1)) # Divide by norm to normalize.
+        desc = self.pool(desc)
+        desc = torch.flatten(desc, 1)
+        classif = self.classif(desc)
+        #fields = self.regressor(out['hidden'])
+        #fields = self.shuffel(fields)
+        return classif#, fields
